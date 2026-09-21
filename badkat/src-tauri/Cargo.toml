@@ -1,6 +1,6 @@
 [package]
 name = "badkat"
-version = "0.1.1"
+version = "0.2.0"
 description = "A desktop cat that closes your doomscrolling."
 edition = "2021"
 rust-version = "1.77"
@@ -27,6 +27,7 @@ features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_System_Threading",
   "Win32_System_Com",
+  "Win32_System_SystemInformation",
 ]
 
 [profile.release]

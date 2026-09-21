@@ -10,6 +10,11 @@
 ------------------------------------------------------------------ */
 (function () {
   const T = window.__TAURI__;
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  function applyMotionPreference() {
+    if (window.gsap) { gsap.globalTimeline.timeScale(reducedMotion.matches ? 200 : 1); }
+  }
+  reducedMotion.addEventListener("change", applyMotionPreference);
 
   /* Outside Tauri (opening settings.html straight in a browser) there is
      no backend. A mock keeps the whole UI developable and inspectable
@@ -18,6 +23,8 @@
     let cfg = {
       enabled: true, mode: "close", countdownSeconds: 3, snoozeMinutes: 5,
       pollMs: 1000, urlPollMs: 1500,
+      dailyAllowance: { enabled: false, minutes: 30 },
+      schedule: { enabled: false, weekdays: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], start: "09:00", end: "17:00" },
       never: ["zoom meeting", "microsoft teams", "google meet"],
       cat: { scale: 1.25, speed: 1, wander: true, sleepy: true },
       rules: [
@@ -30,7 +37,7 @@
     };
     return async (cmd, args) => {
       if (cmd === "get_config") { return cfg; }
-      if (cmd === "save_config") { cfg = args.cfg; return null; }
+      if (cmd === "save_config") { cfg = args.cfg; return { saved: true, issues: [] }; }
       if (cmd === "reset_rules") { return cfg.rules; }
       if (cmd === "check_update") {
         return { available: true, current: "0.1.0", version: "0.2.0",
@@ -39,12 +46,17 @@
       if (cmd === "get_progress") {
         return { level: 4, xp: 42, needed: 105, totalXp: 615, closes: 21, pats: 18, gained: 0, awarded: 0 };
       }
+      if (cmd === "snooze") { return cfg.snoozeMinutes; }
+      if (cmd === "award_pat") {
+        return { level: 4, xp: 44, needed: 105, totalXp: 617, closes: 21, pats: 19, gained: 0, awarded: 2 };
+      }
       if (cmd === "status") {
         return {
           enabled: true, mode: "close", snoozing: false, snoozeSecondsLeft: 0,
           foreground: { title: "(8) Instagram - Google Chrome", url: "instagram.com/reels/Dcq3rV9B6gh/", proc: "chrome", hwnd: 1, pid: 1 },
           haystack: "instagram.com/reels/dcq3rv9b6gh/ | (8) instagram - google chrome | chrome",
           matched: "Instagram Reels", remaining: 3.4, notes: [],
+          usage: { state: "available", usedSeconds: 600, allowanceSeconds: 1800, remainingSeconds: 1200, localDate: "2026-09-20" },
           trail: [
             { at: "+0:12", event: "spotted", rule: "instagram-reels", detail: "(8) Instagram - Google Chrome" },
             { at: "+0:18", event: "caught", rule: "instagram-reels", detail: "(8) Instagram - Google Chrome" },
@@ -67,6 +79,12 @@
     snoozeMinutes: $("snoozeMinutes"),
     pollMs: $("pollMs"),
     urlPollMs: $("urlPollMs"),
+    dailyEnabled: $("dailyEnabled"),
+    dailyMinutes: $("dailyMinutes"),
+    scheduleEnabled: $("scheduleEnabled"),
+    scheduleStart: $("scheduleStart"),
+    scheduleEnd: $("scheduleEnd"),
+    usageStatus: $("usageStatus"),
     never: $("neverList"),
     ruleRows: $("ruleRows"),
     catScale: $("catScale"),
@@ -86,26 +104,77 @@
   document.querySelectorAll(".nav").forEach((btn) => {
     btn.addEventListener("click", () => {
       document.querySelectorAll(".nav").forEach((b) => b.removeAttribute("aria-current"));
-      btn.setAttribute("aria-current", "true");
+      btn.setAttribute("aria-current", "page");
       document.querySelectorAll(".panel").forEach((p) => {
-        p.classList.toggle("is-on", p.dataset.panel === btn.dataset.panel);
+        const active = p.dataset.panel === btn.dataset.panel;
+        p.classList.toggle("is-on", active);
+        p.hidden = !active;
       });
+      const heading = document.querySelector("#" + btn.getAttribute("aria-controls") + " h2");
+      if (heading) { heading.setAttribute("tabindex", "-1"); heading.focus(); }
     });
   });
+  document.querySelectorAll(".panel:not(.is-on)").forEach((panel) => { panel.hidden = true; });
 
   /* ---------------- a live cat in the sidebar ---------------- */
   try {
     CatRig.mount(document.getElementById("brandMount"));
     gsap.registerPlugin(MorphSVGPlugin);
     Cat.init({ state: "sit", roam: false });
+    applyMotionPreference();
   } catch (_) { /* the rig is decoration here; never block settings on it */ }
 
   /* ---------------- saving ---------------- */
   let saveTimer = null;
-  function markSaved() {
+  function markSaved(text = "saved", error = false) {
+    el.savedPill.textContent = text;
+    el.savedPill.setAttribute("role", error ? "alert" : "status");
+    el.savedPill.setAttribute("aria-live", error ? "assertive" : "polite");
     el.savedPill.hidden = false;
     clearTimeout(markSaved.t);
     markSaved.t = setTimeout(() => { el.savedPill.hidden = true; }, 1400);
+  }
+
+  function showValidationIssues(issues) {
+    document.querySelectorAll('[aria-invalid="true"]').forEach((node) => {
+      node.removeAttribute("aria-invalid");
+      node.classList.remove("invalid");
+      node.removeAttribute("aria-errormessage");
+    });
+    document.querySelectorAll(".field-error").forEach((node) => node.remove());
+
+    const staticFields = {
+      countdownSeconds: el.countdown,
+      snoozeMinutes: el.snoozeMinutes,
+      pollMs: el.pollMs,
+      urlPollMs: el.urlPollMs,
+      "cat.scale": el.catScale,
+      "cat.speed": el.catSpeed,
+      "dailyAllowance.minutes": el.dailyMinutes,
+      "schedule.weekdays": document.querySelector('[name="scheduleDay"]'),
+      "schedule.start": el.scheduleStart,
+      "schedule.end": el.scheduleEnd
+    };
+    let first = null;
+    (issues || []).forEach((item, issueIndex) => {
+      let control = staticFields[item.path];
+      const match = /^rules\[(\d+)\]\.(id|label|all|any|grace|action)/.exec(item.path);
+      if (match) {
+        const row = el.ruleRows.children[Number(match[1])];
+        control = row && row.querySelector('[data-field="' + (match[2] === "id" ? "label" : match[2]) + '"]');
+      }
+      if (!control) { return; }
+      const error = document.createElement("span");
+      error.id = "validation-error-" + issueIndex;
+      error.className = "field-error";
+      error.textContent = item.message;
+      control.setAttribute("aria-invalid", "true");
+      control.setAttribute("aria-errormessage", error.id);
+      control.classList.add("invalid");
+      control.insertAdjacentElement("afterend", error);
+      if (!first) { first = control; }
+    });
+    if (first) { first.focus(); }
   }
 
   function scheduleSave() {
@@ -114,7 +183,14 @@
     saveTimer = setTimeout(async () => {
       collect();
       try {
-        await invoke("save_config", { cfg });
+        const result = await invoke("save_config", { cfg });
+        if (result && result.saved === false) {
+          showValidationIssues(result.issues);
+          const message = (result.issues || []).map((item) => item.message).join("; ");
+          markSaved(message || "settings are invalid", true);
+          return;
+        }
+        showValidationIssues([]);
         markSaved();
         paintBrand();
       } catch (err) {
@@ -133,6 +209,22 @@
     el.snoozeMinutes.value = cfg.snoozeMinutes;
     el.pollMs.value = cfg.pollMs;
     el.urlPollMs.value = cfg.urlPollMs;
+    const daily = cfg.dailyAllowance || { enabled: false, minutes: 30 };
+    el.dailyEnabled.checked = daily.enabled === true;
+    el.dailyMinutes.value = daily.minutes ?? 30;
+    const schedule = cfg.schedule || {
+      enabled: false,
+      weekdays: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+      start: "09:00",
+      end: "17:00"
+    };
+    el.scheduleEnabled.checked = schedule.enabled === true;
+    el.scheduleStart.value = schedule.start || "09:00";
+    el.scheduleEnd.value = schedule.end || "17:00";
+    const selectedDays = new Set(schedule.weekdays || []);
+    document.querySelectorAll('[name="scheduleDay"]').forEach((input) => {
+      input.checked = selectedDays.has(input.value);
+    });
     el.never.value = (cfg.never || []).join("\n");
 
     const cat = cfg.cat || {};
@@ -164,6 +256,16 @@
     cfg.snoozeMinutes = clampNum(el.snoozeMinutes.value, 1, 240, 5);
     cfg.pollMs = clampNum(el.pollMs.value, 250, 10000, 1000);
     cfg.urlPollMs = clampNum(el.urlPollMs.value, 500, 10000, 1500);
+    cfg.dailyAllowance = {
+      enabled: el.dailyEnabled.checked,
+      minutes: clampNum(el.dailyMinutes.value, 0, 1440, 30)
+    };
+    cfg.schedule = {
+      enabled: el.scheduleEnabled.checked,
+      weekdays: Array.from(document.querySelectorAll('[name="scheduleDay"]:checked')).map((input) => input.value),
+      start: el.scheduleStart.value,
+      end: el.scheduleEnd.value
+    };
     cfg.never = el.never.value.split("\n").map((s) => s.trim()).filter(Boolean);
     cfg.cat = {
       scale: Number(el.catScale.value),
@@ -190,26 +292,37 @@
     const row = document.createElement("div");
     row.className = "rule" + (rule.enabled === false ? " off" : "");
     row.dataset.id = rule.id;
+    row.setAttribute("role", "group");
+    row.setAttribute("aria-label", "Rule " + (index + 1) + ": " + (rule.label || rule.id));
 
     const on = document.createElement("input");
     on.type = "checkbox";
     on.checked = rule.enabled !== false;
     on.title = "Enable this rule";
+    on.setAttribute("aria-label", "Enable rule " + (rule.label || index + 1));
     on.addEventListener("change", () => {
       row.classList.toggle("off", !on.checked);
       scheduleSave();
     });
 
     const label = input("text", rule.label || rule.id);
+    label.setAttribute("aria-label", "Rule " + (index + 1) + " name");
+    label.dataset.field = "label";
     const any = input("text", (rule.any || []).join(", "));
+    any.setAttribute("aria-label", "Rule " + (index + 1) + " match any patterns");
+    any.dataset.field = "any";
     any.classList.add("pat");
     any.placeholder = "youtube.com/shorts";
     const all = input("text", (rule.all || []).join(", "));
+    all.setAttribute("aria-label", "Rule " + (index + 1) + " match all patterns");
+    all.dataset.field = "all";
     all.classList.add("pat");
     all.placeholder = "(optional)";
 
     const grace = input("number", rule.grace);
     grace.min = 0; grace.max = 3600;
+    grace.setAttribute("aria-label", "Rule " + (index + 1) + " grace seconds");
+    grace.dataset.field = "grace";
 
     const action = document.createElement("select");
     [["tab", "Close tab"], ["close", "Close window"]].forEach(([v, t]) => {
@@ -219,22 +332,29 @@
       action.appendChild(o);
     });
     action.addEventListener("change", scheduleSave);
+    action.setAttribute("aria-label", "Rule " + (index + 1) + " action");
+    action.dataset.field = "action";
 
     const del = document.createElement("button");
     del.className = "iconbtn";
     del.textContent = "×";
     del.title = "Delete this rule";
+    del.setAttribute("aria-label", "Delete rule " + (rule.label || index + 1));
     del.addEventListener("click", () => {
       collect();
       cfg.rules.splice(index, 1);
       renderRules();
+      const rows = Array.from(el.ruleRows.children);
+      const focusRow = rows[Math.min(index, rows.length - 1)];
+      const focusTarget = focusRow && focusRow.querySelector('[data-field="label"]');
+      (focusTarget || $("addRule")).focus();
       scheduleSave();
     });
 
     row.append(on, label, any, all, grace, action, del);
     row._read = () => ({
       id: rule.id,
-      label: label.value.trim() || rule.id,
+      label: label.value.trim(),
       any: splitList(any.value),
       all: splitList(all.value),
       grace: clampNum(grace.value, 0, 3600, 10),
@@ -256,10 +376,7 @@
 
   function readRules() {
     return Array.from(el.ruleRows.children)
-      .map((row) => row._read())
-      // a rule with no patterns matches nothing, which looks exactly
-      // like the app being broken -- drop it rather than save it
-      .filter((r) => r.any.length || r.all.length);
+      .map((row) => row._read());
   }
 
   $("addRule").addEventListener("click", () => {
@@ -274,6 +391,9 @@
       enabled: true
     });
     renderRules();
+    const added = el.ruleRows.lastElementChild;
+    const name = added && added.querySelector('[data-field="label"]');
+    if (name) { name.focus(); name.select(); }
   });
 
   $("resetRules").addEventListener("click", async () => {
@@ -297,6 +417,18 @@
   });
 
   $("previewBust").addEventListener("click", () => invoke("preview_bust", {}).catch(() => {}));
+  $("snoozeNow").addEventListener("click", async () => {
+    try {
+      const minutes = await invoke("snooze", {});
+      markSaved("Snoozed for " + minutes + " minutes");
+    } catch (err) { markSaved("Could not snooze", true); }
+  });
+  $("patNow").addEventListener("click", async () => {
+    try {
+      await invoke("award_pat", {});
+      markSaved("Cat patted");
+    } catch (err) { markSaved("Could not pat the cat", true); }
+  });
 
   let catVisible = true;
   $("toggleCat").addEventListener("click", (e) => {
@@ -306,9 +438,11 @@
   });
 
   /* ---------------- generic bindings ---------------- */
-  [el.enabled, el.modeClose, el.modeNag, el.catWander, el.catSleepy]
+  [el.enabled, el.modeClose, el.modeNag, el.catWander, el.catSleepy,
+   el.dailyEnabled, el.scheduleEnabled, ...document.querySelectorAll('[name="scheduleDay"]')]
     .forEach((n) => n.addEventListener("change", scheduleSave));
-  [el.countdown, el.snoozeMinutes, el.pollMs, el.urlPollMs, el.never]
+  [el.countdown, el.snoozeMinutes, el.pollMs, el.urlPollMs, el.never,
+   el.dailyMinutes, el.scheduleStart, el.scheduleEnd]
     .forEach((n) => n.addEventListener("input", scheduleSave));
 
   /* ---------------- live view ---------------- */
@@ -327,6 +461,17 @@
     live.url.textContent = fg && fg.url ? fg.url : (fg ? "(no address bar — fullscreen video, or not a browser)" : "—");
     live.proc.textContent = fg && fg.proc ? fg.proc : "—";
     live.hay.textContent = s.haystack || "—";
+
+    const usage = s.usage;
+    if (!usage || usage.state === "disabled") {
+      el.usageStatus.textContent = "Daily allowance is off.";
+    } else if (usage.state === "outside-schedule") {
+      el.usageStatus.textContent = "Outside scheduled patrol hours.";
+    } else if (usage.state === "exhausted") {
+      el.usageStatus.textContent = "Today's allowance is used; normal enforcement is active.";
+    } else {
+      el.usageStatus.textContent = Math.ceil((usage.remainingSeconds || 0) / 60) + " minutes remaining today.";
+    }
 
     if (s.snoozing) {
       live.rule.textContent = "snoozed";

@@ -208,6 +208,9 @@ html, body {
 .row { display: flex; gap: 11px; align-items: flex-start; padding: 7px 0; cursor: pointer; }
 .row + .row { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 13px; }
 .row input { margin-top: 2px; accent-color: var(--accent); width: 16px; height: 16px; }
+.weekday-picker { border: 0; margin: 14px 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px 14px; }
+.weekday-picker legend { font-weight: 600; margin-bottom: 8px; }
+.weekday-picker label { display: inline-flex; align-items: center; gap: 5px; }
 .lbl { display: block; line-height: 1.5; }
 .lbl b { display: block; font-weight: 600; }
 .lbl i { display: block; font-style: normal; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
@@ -230,8 +233,23 @@ input[type="number"], input[type="text"], textarea, select {
 input[type="number"] { width: 96px; }
 textarea { font-family: var(--mono); font-size: 12.5px; line-height: 1.7; resize: vertical; }
 input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 3px solid var(--gold);
+  outline-offset: 2px;
+}
+.invalid { border-color: var(--warn) !important; }
+.field-error { display: block; color: #ff8f87; font-size: 12px; margin-top: 5px; }
 
 input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .1ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: .1ms !important;
+  }
+}
 
 /* ---------- rules table ---------- */
 .rules-head, .rule {

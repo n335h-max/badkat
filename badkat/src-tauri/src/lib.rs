@@ -10,9 +10,12 @@
 //! The overlay never gets a window handle and never closes anything by
 //! itself. It asks, and the Rust side re-verifies before acting.
 
+mod action_tickets;
 mod config;
 mod progress;
 mod rules;
+mod storage;
+mod usage;
 mod win;
 
 use std::path::PathBuf;
@@ -26,7 +29,8 @@ use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder,
 };
 
-use config::Config;
+use action_tickets::ActionTickets;
+use config::{Config, EnforcementMode};
 use progress::Progress;
 use win::Snapshot;
 
@@ -58,11 +62,15 @@ pub struct Shared {
     started: Instant,
     progress: Progress,
     last_pat: Option<Instant>,
+    action_tickets: ActionTickets,
+    usage: usage::UsageTracker,
 }
 
 impl Shared {
     fn snoozing(&self) -> bool {
-        self.snooze_until.map(|t| Instant::now() < t).unwrap_or(false)
+        self.snooze_until
+            .map(|t| Instant::now() < t)
+            .unwrap_or(false)
     }
 
     fn note(&mut self, event: &str, rule: &str, detail: &str) {
@@ -93,8 +101,9 @@ pub type State = Arc<Mutex<Shared>>;
 struct BustPayload {
     rule_id: String,
     label: String,
-    target: Snapshot,
-    mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action_id: Option<String>,
+    mode: EnforcementMode,
     countdown: u64,
     /// The offending window's horizontal centre, in the overlay's own
     /// local coordinate space (physical px, already offset by the work
@@ -150,7 +159,7 @@ impl ProgressView {
 #[serde(rename_all = "camelCase")]
 struct StatusInfo {
     enabled: bool,
-    mode: String,
+    mode: EnforcementMode,
     snoozing: bool,
     snooze_seconds_left: u64,
     foreground: Option<Snapshot>,
@@ -159,6 +168,14 @@ struct StatusInfo {
     remaining: f64,
     notes: Vec<String>,
     trail: Vec<TrailEntry>,
+    usage: usage::UsageStatus,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveConfigResult {
+    saved: bool,
+    issues: Vec<config::ValidationIssue>,
 }
 
 /* ------------------------------------------------------------------
@@ -171,23 +188,39 @@ fn get_config(state: tauri::State<State>) -> Config {
 }
 
 #[tauri::command]
-fn save_config(app: AppHandle, state: tauri::State<State>, cfg: Config) -> Result<(), String> {
+fn save_config(
+    app: AppHandle,
+    state: tauri::State<State>,
+    cfg: Config,
+) -> Result<SaveConfigResult, String> {
+    let issues = cfg.validate();
+    if !issues.is_empty() {
+        return Ok(SaveConfigResult {
+            saved: false,
+            issues,
+        });
+    }
     let mut guard = state.lock().unwrap();
     let dir = guard.dir.clone();
     config::save(&dir, &cfg).map_err(|e| e.to_string())?;
     guard.cfg = cfg.clone();
+    guard.action_tickets.clear();
     guard.note("settings", "", "saved");
     drop(guard);
 
     // the overlay reads cat size/speed straight from the config
     let _ = app.emit("config-changed", cfg);
-    Ok(())
+    Ok(SaveConfigResult {
+        saved: true,
+        issues: Vec::new(),
+    })
 }
 
 #[tauri::command]
 fn reset_rules(state: tauri::State<State>) -> Vec<config::Rule> {
     let mut guard = state.lock().unwrap();
     guard.cfg.rules = config::default_rules();
+    guard.action_tickets.clear();
     let dir = guard.dir.clone();
     let cfg = guard.cfg.clone();
     let _ = config::save(&dir, &cfg);
@@ -200,7 +233,7 @@ fn status(state: tauri::State<State>) -> StatusInfo {
     let snoozing = guard.snoozing();
     StatusInfo {
         enabled: guard.cfg.enabled,
-        mode: guard.cfg.mode.clone(),
+        mode: guard.cfg.mode,
         snoozing,
         snooze_seconds_left: guard
             .snooze_until
@@ -212,6 +245,7 @@ fn status(state: tauri::State<State>) -> StatusInfo {
         remaining: guard.remaining,
         notes: guard.notes.clone(),
         trail: guard.trail.clone(),
+        usage: guard.usage.status(&guard.cfg, usage::local_now()),
     }
 }
 
@@ -304,7 +338,13 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
             move |chunk, total| {
                 downloaded += chunk as u64;
                 let pct = total
-                    .map(|t| if t > 0 { (downloaded as f64 / t as f64) * 100.0 } else { 0.0 })
+                    .map(|t| {
+                        if t > 0 {
+                            (downloaded as f64 / t as f64) * 100.0
+                        } else {
+                            0.0
+                        }
+                    })
                     .unwrap_or(0.0);
                 let _ = progress.emit(
                     "update-progress",
@@ -409,23 +449,58 @@ fn award_pat(app: AppHandle, state: tauri::State<State>) -> ProgressView {
 
 /// The overlay asks for this when its countdown reaches zero.
 #[tauri::command]
-fn act(app: AppHandle, state: tauri::State<State>, target: Snapshot) -> win::ActResult {
-    let guard = state.lock().unwrap();
-    if guard.cfg.mode != "close" {
-        return win::ActResult {
-            acted: false,
-            reason: "nag mode".into(),
-        };
-    }
-    let action = rules::matches(&guard.cfg, &target)
-        .map(|r| rules::action_for(r, &target))
-        .unwrap_or_else(|| "tab".into());
-    drop(guard);
+async fn act(app: AppHandle, state: tauri::State<'_, State>, action_id: String) -> win::ActResult {
+    let inner: State = state.inner().clone();
+    let now = Instant::now();
+    let fresh = win::fresh_foreground().unwrap_or_default();
+    let authorized = {
+        let mut guard = inner.lock().unwrap();
+        let mut cfg = guard.cfg.clone();
+        let usage_state = guard.usage.status(&cfg, usage::local_now()).state;
+        if guard.snoozing()
+            || matches!(
+                usage_state,
+                usage::UsageState::OutsideSchedule | usage::UsageState::Available
+            )
+        {
+            cfg.mode = EnforcementMode::Nag;
+        }
+        guard
+            .action_tickets
+            .authorize(&action_id, &fresh, &cfg, now)
+    };
+    let authorized = match authorized {
+        Ok(action) => action,
+        Err(reason) => {
+            let mut guard = inner.lock().unwrap();
+            guard.note("skipped", "", reason);
+            return win::ActResult {
+                acted: false,
+                reason: reason.into(),
+            };
+        }
+    };
 
-    let result = win::close_target(&target, &action);
+    let dispatched = win::close_target(&authorized.target, authorized.action);
+    let result = if dispatched.acted {
+        let target = authorized.target;
+        let rule = authorized.rule;
+        let url_required = authorized.url_required;
+        let action = authorized.action;
+        tauri::async_runtime::spawn_blocking(move || {
+            win::confirm_closed(&target, &rule, url_required, action)
+        })
+        .await
+        .unwrap_or_else(|_| win::ActResult {
+            acted: false,
+            reason: "close confirmation failed".into(),
+        })
+    } else {
+        dispatched
+    };
 
     {
-        let mut guard = state.lock().unwrap();
+        let mut guard = inner.lock().unwrap();
         guard.cooldown_until = Some(Instant::now() + COOLDOWN);
         guard.note(
             if result.acted { "closed" } else { "skipped" },
@@ -437,7 +512,6 @@ fn act(app: AppHandle, state: tauri::State<State>, target: Snapshot) -> win::Act
     // only a window that actually closed is worth anything — a skipped
     // or refused close would otherwise pay out for doing nothing
     if result.acted {
-        let inner: State = state.inner().clone();
         bank_xp(&app, &inner, progress::XP_CLOSE, "close");
     }
     result
@@ -448,6 +522,7 @@ fn snooze(state: tauri::State<State>, minutes: Option<u64>) -> u64 {
     let mut guard = state.lock().unwrap();
     let mins = minutes.unwrap_or(guard.cfg.snooze_minutes);
     guard.snooze_until = Some(Instant::now() + Duration::from_secs(mins * 60));
+    guard.action_tickets.clear();
     guard.note("snooze", "", &format!("{mins} min"));
     mins
 }
@@ -482,7 +557,9 @@ fn cancel_snooze(state: tauri::State<State>) {
 /// its own bounds needs no tricks at all — that's just how windows work.
 #[tauri::command]
 fn set_hitbox(app: AppHandle, x: i32, y: i32, w: i32, h: i32) {
-    let Some(hitbox) = app.get_webview_window("hitbox") else { return };
+    let Some(hitbox) = app.get_webview_window("hitbox") else {
+        return;
+    };
     if w <= 0 || h <= 0 {
         // park it off-screen rather than trying to shrink to nothing,
         // which some window managers refuse or clamp oddly
@@ -495,7 +572,10 @@ fn set_hitbox(app: AppHandle, x: i32, y: i32, w: i32, h: i32) {
     #[cfg(debug_assertions)]
     eprintln!(
         "[badkat] hitbox   screen=({},{},{},{})",
-        ox + x, oy + y, ox + x + w, oy + y + h
+        ox + x,
+        oy + y,
+        ox + x + w,
+        oy + y + h
     );
 }
 
@@ -519,8 +599,8 @@ fn preview_bust(app: AppHandle, state: tauri::State<State>) {
     let payload = BustPayload {
         rule_id: "preview".into(),
         label: "YouTube Shorts".into(),
-        target: Snapshot::default(),
-        mode: "nag".into(), // a preview never closes anything
+        action_id: None,
+        mode: EnforcementMode::Nag, // a preview never closes anything
         countdown: guard.cfg.countdown_seconds,
         window_center_x: None,
     };
@@ -737,10 +817,24 @@ fn spawn_monitor(app: AppHandle, state: State) {
                         .map(|t| Instant::now() < t)
                         .unwrap_or(false);
 
-                let hit = if paused {
+                let raw_hit = rules::matches(&guard.cfg, &snap).cloned();
+                let sample_now = Instant::now();
+                let cfg = guard.cfg.clone();
+                let usage_decision =
+                    guard
+                        .usage
+                        .tick(&cfg, usage::local_now(), sample_now, raw_hit.is_some());
+                if guard.usage.should_flush(sample_now) {
+                    let saved = usage::save(&guard.dir, guard.usage.record()).is_ok();
+                    if saved {
+                        guard.usage.mark_flushed(sample_now);
+                    }
+                }
+
+                let hit = if paused || !usage_decision.enforcement_allowed {
                     None
                 } else {
-                    rules::matches(&guard.cfg, &snap).cloned()
+                    raw_hit
                 };
 
                 #[cfg(debug_assertions)]
@@ -791,7 +885,7 @@ fn spawn_monitor(app: AppHandle, state: State) {
 
                         let key = format!("{}|{}|{}", snap.hwnd, snap.title, snap.url);
                         let countdown = guard.cfg.countdown_seconds;
-                        let mode = guard.cfg.mode.clone();
+                        let mode = guard.cfg.mode;
 
                         if remaining > 0.0 {
                             drop(guard);
@@ -806,14 +900,26 @@ fn spawn_monitor(app: AppHandle, state: State) {
                             );
                         } else if pending != key {
                             pending = key;
+                            let action_id = if mode.is_close() {
+                                let action = rules::action_for(&rule, &snap);
+                                guard.action_tickets.issue(
+                                    &snap,
+                                    &rule,
+                                    action,
+                                    Duration::from_secs(countdown),
+                                    Instant::now(),
+                                )
+                            } else {
+                                None
+                            };
                             guard.note("caught", &rule.id, &snap.title);
                             drop(guard);
 
                             // local to the overlay, which sits at the work
                             // area's own origin — see build_overlay()
                             let overlay_x = work_area().0;
-                            let window_center_x = win::window_center_x(snap.hwnd)
-                                .map(|cx| cx - overlay_x as f64);
+                            let window_center_x =
+                                win::window_center_x(snap.hwnd).map(|cx| cx - overlay_x as f64);
 
                             let sent = app.emit_to(
                                 "pet",
@@ -821,7 +927,7 @@ fn spawn_monitor(app: AppHandle, state: State) {
                                 BustPayload {
                                     rule_id: rule.id.clone(),
                                     label: rule.label.clone(),
-                                    target: snap.clone(),
+                                    action_id,
                                     mode,
                                     countdown,
                                     window_center_x,
@@ -832,6 +938,37 @@ fn spawn_monitor(app: AppHandle, state: State) {
                         }
                     }
                 }
+            } else {
+                // Advance the monotonic usage clock even when Windows has
+                // no readable foreground target. Otherwise the next matched
+                // sample would incorrectly charge this entire gap.
+                let sample_now = Instant::now();
+                let mut guard = state.lock().unwrap();
+                let cfg = guard.cfg.clone();
+                guard
+                    .usage
+                    .tick(&cfg, usage::local_now(), sample_now, false);
+                if guard.usage.should_flush(sample_now) {
+                    let saved = usage::save(&guard.dir, guard.usage.record()).is_ok();
+                    if saved {
+                        guard.usage.mark_flushed(sample_now);
+                    }
+                }
+                guard.last = None;
+                guard.matched = None;
+                guard.remaining = 0.0;
+                match_id.clear();
+                pending.clear();
+                drop(guard);
+                let _ = app.emit_to(
+                    "pet",
+                    "status",
+                    StatusPayload {
+                        watching: false,
+                        label: String::new(),
+                        remaining: 0.0,
+                    },
+                );
             }
 
             std::thread::sleep(Duration::from_millis(poll_ms));
@@ -878,6 +1015,7 @@ fn build_tray(app: &AppHandle, state: State) -> tauri::Result<()> {
                 "enabled" => {
                     let mut guard = state.lock().unwrap();
                     guard.cfg.enabled = !guard.cfg.enabled;
+                    guard.action_tickets.clear();
                     let dir = guard.dir.clone();
                     let cfg = guard.cfg.clone();
                     let _ = config::save(&dir, &cfg);
@@ -886,6 +1024,7 @@ fn build_tray(app: &AppHandle, state: State) -> tauri::Result<()> {
                     let mut guard = state.lock().unwrap();
                     let mins = guard.cfg.snooze_minutes;
                     guard.snooze_until = Some(Instant::now() + Duration::from_secs(mins * 60));
+                    guard.action_tickets.clear();
                 }
                 "show" => {
                     if let Some(w) = app.get_webview_window("pet") {
@@ -925,22 +1064,34 @@ pub fn run() {
             // check before loading: load() writes the defaults out on
             // first run, so asking afterwards always says "not first run"
             let first_run = !config::config_path(&dir).exists();
-            let (cfg, notes) = config::load(&dir);
+            let (cfg, mut notes) = config::load(&dir);
             #[cfg(debug_assertions)]
             eprintln!(
                 "[badkat] config {} - {} rule(s), mode {}, enabled {}{}",
                 config::config_path(&dir).display(),
                 cfg.rules.len(),
-                cfg.mode,
+                cfg.mode.as_str(),
                 cfg.enabled,
-                if notes.is_empty() { String::new() } else { format!(" - {}", notes.join("; ")) }
+                if notes.is_empty() {
+                    String::new()
+                } else {
+                    format!(" - {}", notes.join("; "))
+                }
             );
 
-            let earned = progress::load(&dir);
+            let (earned, progress_notes) = progress::load(&dir);
+            notes.extend(progress_notes);
+            let civil = usage::local_now();
+            let (daily_usage, usage_notes) = usage::load(&dir, civil.date());
+            notes.extend(usage_notes);
             #[cfg(debug_assertions)]
             eprintln!(
                 "[badkat] progress level {} - {}/{} xp, {} closed, {} pats",
-                earned.level, earned.xp, earned.needed(), earned.closes, earned.pats
+                earned.level,
+                earned.xp,
+                earned.needed(),
+                earned.closes,
+                earned.pats
             );
 
             let state: State = Arc::new(Mutex::new(Shared {
@@ -956,6 +1107,8 @@ pub fn run() {
                 started: Instant::now(),
                 progress: earned,
                 last_pat: None,
+                action_tickets: ActionTickets::default(),
+                usage: usage::UsageTracker::new(daily_usage, Instant::now()),
             }));
             app.manage(state.clone());
 
@@ -993,7 +1146,7 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error building BadKat")
-        .run(|_app, event| {
+        .run(|app, event| {
             // A tray app outlives its windows: closing the settings window
             // must not end the process. But Tauri raises ExitRequested for
             // BOTH cases, so preventing it unconditionally also swallowed
@@ -1003,6 +1156,10 @@ pub fn run() {
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
                 if code.is_none() {
                     api.prevent_exit();
+                } else {
+                    let state = app.state::<State>();
+                    let guard = state.lock().unwrap();
+                    let _ = usage::save(&guard.dir, guard.usage.record());
                 }
             }
         });

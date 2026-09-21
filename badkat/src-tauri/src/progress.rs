@@ -43,7 +43,13 @@ pub struct Progress {
 
 impl Default for Progress {
     fn default() -> Self {
-        Self { level: 1, xp: 0, total_xp: 0, closes: 0, pats: 0 }
+        Self {
+            level: 1,
+            xp: 0,
+            total_xp: 0,
+            closes: 0,
+            pats: 0,
+        }
     }
 }
 
@@ -78,22 +84,48 @@ pub fn progress_path(dir: &Path) -> PathBuf {
 
 /// A missing or unreadable file is a brand new cat, not an error worth
 /// stopping for — the app still has to start.
-pub fn load(dir: &Path) -> Progress {
-    let Ok(raw) = std::fs::read_to_string(progress_path(dir)) else {
-        return Progress::default();
-    };
-    serde_json::from_str::<Progress>(raw.trim_start_matches('\u{feff}')).unwrap_or_default()
+pub fn load(dir: &Path) -> (Progress, Vec<String>) {
+    match crate::storage::load_json(&progress_path(dir)) {
+        crate::storage::LoadJson::Primary(progress) => (progress, Vec::new()),
+        crate::storage::LoadJson::Backup(progress) => (
+            progress,
+            vec!["progress.json was recovered from its backup".into()],
+        ),
+        crate::storage::LoadJson::Missing => (Progress::default(), Vec::new()),
+        crate::storage::LoadJson::Invalid { primary, backup } => {
+            let backup = backup
+                .map(|err| format!("; backup: {err}"))
+                .unwrap_or_default();
+            (
+                Progress::default(),
+                vec![format!(
+                    "progress.json could not be read ({primary}{backup}), using defaults"
+                )],
+            )
+        }
+    }
 }
 
 pub fn save(dir: &Path, p: &Progress) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let text = serde_json::to_string_pretty(p).unwrap_or_else(|_| "{}".into());
-    std::fs::write(progress_path(dir), text)
+    crate::storage::save_json(&progress_path(dir), p)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn temp_dir() -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let path = std::env::temp_dir().join(format!(
+            "badkat-progress-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn each_level_costs_more_than_the_last() {
@@ -140,5 +172,26 @@ mod tests {
         p.award(30);
         p.award(30);
         assert_eq!(p.total_xp, 60);
+    }
+
+    #[test]
+    fn invalid_primary_recovers_progress_from_backup_with_note() {
+        let dir = temp_dir();
+        let path = progress_path(&dir);
+        let mut expected = Progress::default();
+        expected.award(30);
+        fs::write(&path, "invalid").unwrap();
+        fs::write(
+            path.with_extension("json.bak"),
+            serde_json::to_string_pretty(&expected).unwrap(),
+        )
+        .unwrap();
+
+        let (loaded, notes) = load(&dir);
+        assert_eq!(loaded.total_xp, 30);
+        assert!(notes
+            .iter()
+            .any(|note| note.contains("recovered from its backup")));
+        fs::remove_dir_all(dir).unwrap();
     }
 }

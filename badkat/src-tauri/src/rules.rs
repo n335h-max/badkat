@@ -1,6 +1,6 @@
 //! Deciding whether what is in front of you counts as doomscrolling.
 
-use crate::config::{Config, Rule};
+use crate::config::{Config, Rule, RuleAction};
 use crate::win::Snapshot;
 
 /// URL first — it is the only place "reels" or "shorts" ever appears.
@@ -24,7 +24,6 @@ pub fn matches<'a>(cfg: &'a Config, snap: &Snapshot) -> Option<&'a Rule> {
     }
 
     let hay = haystack(snap);
-
     for pattern in &cfg.never {
         let p = pattern.trim().to_ascii_lowercase();
         if !p.is_empty() && hay.contains(&p) {
@@ -32,33 +31,53 @@ pub fn matches<'a>(cfg: &'a Config, snap: &Snapshot) -> Option<&'a Rule> {
         }
     }
 
-    cfg.rules.iter().find(|rule| {
-        if !rule.enabled {
-            return false;
-        }
-        let all_hit = rule
-            .all
+    cfg.rules.iter().find(|rule| rule_matches(rule, snap))
+}
+
+/// Whether this rule only matched because the foreground URL was
+/// available. A close ticket remembers this so a failed address-bar
+/// read at action time cannot silently weaken a URL rule into a title
+/// rule.
+pub fn requires_url(rule: &Rule, snap: &Snapshot) -> bool {
+    if snap.url.is_empty() || !rule_matches(rule, snap) {
+        return false;
+    }
+    let mut without_url = snap.clone();
+    without_url.url.clear();
+    !rule_matches(rule, &without_url)
+}
+
+pub fn matches_rule(rule: &Rule, snap: &Snapshot) -> bool {
+    rule_matches(rule, snap)
+}
+
+fn rule_matches(rule: &Rule, snap: &Snapshot) -> bool {
+    if !rule.enabled {
+        return false;
+    }
+    let hay = haystack(snap);
+    let all_hit = rule
+        .all
+        .iter()
+        .all(|p| hay.contains(&p.trim().to_ascii_lowercase()));
+    let any_hit = rule.any.is_empty()
+        || rule
+            .any
             .iter()
-            .all(|p| hay.contains(&p.trim().to_ascii_lowercase()));
-        let any_hit = rule.any.is_empty()
-            || rule
-                .any
-                .iter()
-                .any(|p| hay.contains(&p.trim().to_ascii_lowercase()));
-        !(rule.all.is_empty() && rule.any.is_empty()) && all_hit && any_hit
-    })
+            .any(|p| hay.contains(&p.trim().to_ascii_lowercase()));
+    !(rule.all.is_empty() && rule.any.is_empty()) && all_hit && any_hit
 }
 
 /// A browser tab is cheap to close; a desktop app is not, so anything
 /// that is not a browser gets a real window close instead of Ctrl+W.
-pub fn action_for(rule: &Rule, snap: &Snapshot) -> String {
-    if rule.action == "close" {
-        return "close".into();
+pub fn action_for(rule: &Rule, snap: &Snapshot) -> RuleAction {
+    if rule.action == RuleAction::Close {
+        return RuleAction::Close;
     }
     if crate::win::is_browser(&snap.proc) {
-        "tab".into()
+        RuleAction::Tab
     } else {
-        "close".into()
+        RuleAction::Close
     }
 }
 
@@ -80,7 +99,11 @@ mod tests {
     fn reels_are_only_visible_in_the_url() {
         let cfg = Config::default();
         // the title says nothing but "Instagram"
-        let s = snap("instagram.com/reels/Dcq3rV9B6gh/", "(8) Instagram", "chrome");
+        let s = snap(
+            "instagram.com/reels/Dcq3rV9B6gh/",
+            "(8) Instagram",
+            "chrome",
+        );
         assert_eq!(matches(&cfg, &s).unwrap().id, "instagram-reels");
     }
 

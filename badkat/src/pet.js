@@ -18,6 +18,11 @@
 ------------------------------------------------------------------ */
 (function () {
   const T = window.__TAURI__;
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  const applyMotionPreference = () => {
+    if (window.gsap) { gsap.globalTimeline.timeScale(reducedMotion.matches ? 200 : 1); }
+  };
+  reducedMotion.addEventListener("change", applyMotionPreference);
   const invoke = T ? T.core.invoke : async () => ({});
   const listen = T ? T.event.listen : async () => {};
 
@@ -44,6 +49,7 @@
   gsap.registerPlugin(MorphSVGPlugin);
   CatRig.mount(document.getElementById("petScene"));
   Cat.init({ state: "sit", roam: false });   // we drive position ourselves
+  applyMotionPreference();
 
   /* ---------------------------------------------------------------
      position — both axes live in #pet's own x/y (GSAP transform),
@@ -265,14 +271,14 @@
       await Cat.swipe(() => {
         if (stale(mine)) { return; }               // interrupted mid-swing — don't close
         updateBubble("", "done");
-        actCall = invoke("act", { target: payload.target });
+        actCall = invoke("act", { actionId: payload.actionId });
       });
     } catch (err) { log("swipe failed: " + err); }
 
     if (stale(mine)) { abandon(); return; }
 
     try {
-      result = await (actCall || invoke("act", { target: payload.target }));
+      result = await (actCall || invoke("act", { actionId: payload.actionId }));
     } catch (err) { log("act failed: " + err); }
     if (stale(mine)) { abandon(); return; }
 

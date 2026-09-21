@@ -15,7 +15,10 @@
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
+use crate::config::{Rule, RuleAction};
+
 use uiautomation::{UIAutomation, UIElement};
+use windows::Win32::Foundation::RECT;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -24,7 +27,6 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     VIRTUAL_KEY, VK_CONTROL, VK_W,
 };
-use windows::Win32::Foundation::RECT;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, PostMessageW,
     WM_CLOSE,
@@ -41,8 +43,17 @@ pub struct Snapshot {
 }
 
 pub const BROWSERS: &[&str] = &[
-    "chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "arc", "chromium", "librewolf",
-    "zen", "opera_gx",
+    "chrome",
+    "msedge",
+    "firefox",
+    "brave",
+    "opera",
+    "vivaldi",
+    "arc",
+    "chromium",
+    "librewolf",
+    "zen",
+    "opera_gx",
 ];
 
 pub fn is_browser(proc_name: &str) -> bool {
@@ -149,7 +160,9 @@ impl UrlReader {
         }
 
         let automation = self.automation.as_ref()?;
-        let root = automation.element_from_handle(uiautomation::types::Handle::from(hwnd)).ok()?;
+        let root = automation
+            .element_from_handle(uiautomation::types::Handle::from(hwnd))
+            .ok()?;
         let matcher = automation
             .create_matcher()
             .from_ref(&root)
@@ -220,7 +233,9 @@ impl UrlReader {
 }
 
 fn read_value(element: &UIElement) -> Option<String> {
-    let pattern = element.get_pattern::<uiautomation::patterns::UIValuePattern>().ok()?;
+    let pattern = element
+        .get_pattern::<uiautomation::patterns::UIValuePattern>()
+        .ok()?;
     pattern.get_value().ok()
 }
 
@@ -231,9 +246,22 @@ pub fn foreground(reader: &mut UrlReader, url_throttle: Duration) -> Option<Snap
         return None;
     }
 
+    snapshot_for_hwnd(hwnd.0 as isize, reader, url_throttle)
+}
+
+fn snapshot_for_hwnd(
+    hwnd_value: isize,
+    reader: &mut UrlReader,
+    url_throttle: Duration,
+) -> Option<Snapshot> {
+    let hwnd = HWND(hwnd_value as *mut std::ffi::c_void);
+
     let title = window_title(hwnd);
     let mut pid: u32 = 0;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 {
+        return None;
+    }
     let proc = process_name(pid);
 
     let url = if is_browser(&proc) {
@@ -250,6 +278,90 @@ pub fn foreground(reader: &mut UrlReader, url_throttle: Duration) -> Option<Snap
         title,
         url,
     })
+}
+
+fn confirmation_result(
+    action: RuleAction,
+    original: &Snapshot,
+    rule: &Rule,
+    url_required: bool,
+    observed: Option<&Snapshot>,
+) -> Option<bool> {
+    let Some(observed) = observed else {
+        return Some(true);
+    };
+    if observed.hwnd != original.hwnd || observed.pid != original.pid {
+        return Some(true);
+    }
+    if action == RuleAction::Close {
+        return Some(false);
+    }
+    if observed.proc.trim().is_empty() {
+        return None;
+    }
+    if !observed.proc.eq_ignore_ascii_case(&original.proc) {
+        return Some(true);
+    }
+    if url_required && observed.url.trim().is_empty() {
+        return None;
+    }
+    Some(!crate::rules::matches_rule(rule, observed))
+}
+
+pub fn confirm_closed(
+    original: &Snapshot,
+    rule: &Rule,
+    url_required: bool,
+    action: RuleAction,
+) -> ActResult {
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+
+    let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut reader = UrlReader::new();
+    let confirmed = loop {
+        let observed = snapshot_for_hwnd(original.hwnd, &mut reader, Duration::ZERO);
+        if confirmation_result(action, original, rule, url_required, observed.as_ref())
+            == Some(true)
+        {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(125));
+    };
+    if initialized {
+        unsafe { CoUninitialize() };
+    }
+
+    if confirmed {
+        ActResult {
+            acted: true,
+            reason: action.as_str().into(),
+        }
+    } else {
+        ActResult {
+            acted: false,
+            reason: "the target did not close".into(),
+        }
+    }
+}
+
+/// Captures the foreground identity and browser URL at action time.
+/// This deliberately uses a new reader so a cached address-bar value
+/// from the monitor cannot authorize a tab that changed during the
+/// countdown.
+pub fn fresh_foreground() -> Option<Snapshot> {
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+
+    let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+    let mut reader = UrlReader::new();
+    let snap = foreground(&mut reader, Duration::ZERO);
+    if initialized {
+        unsafe { CoUninitialize() };
+    }
+    snap
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -284,7 +396,7 @@ fn key(vk: VIRTUAL_KEY, up: bool) -> INPUT {
 /// This re-check is the whole safety story. Between the cat deciding to
 /// act and this running, you may have alt-tabbed to real work; sending
 /// Ctrl+W blind would close a tab of whatever happened to be in front.
-pub fn close_target(target: &Snapshot, mode: &str) -> ActResult {
+pub fn close_target(target: &Snapshot, action: RuleAction) -> ActResult {
     let current = unsafe { GetForegroundWindow() };
     if current.is_invalid() || current.0 as isize != target.hwnd {
         return ActResult {
@@ -310,7 +422,7 @@ pub fn close_target(target: &Snapshot, mode: &str) -> ActResult {
         };
     }
 
-    if mode == "tab" {
+    if action == RuleAction::Tab {
         let inputs = [
             key(VK_CONTROL, false),
             key(VK_W, false),
@@ -325,18 +437,24 @@ pub fn close_target(target: &Snapshot, mode: &str) -> ActResult {
             };
         }
     } else {
-        let _ = unsafe { PostMessageW(Some(current), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+        if unsafe { PostMessageW(Some(current), WM_CLOSE, WPARAM(0), LPARAM(0)) }.is_err() {
+            return ActResult {
+                acted: false,
+                reason: "the close message was blocked".into(),
+            };
+        }
     }
 
     ActResult {
         acted: true,
-        reason: mode.into(),
+        reason: action.as_str().into(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::strip_notification_prefix;
+    use super::*;
+    use crate::config::Config;
 
     #[test]
     fn drops_a_leading_unread_badge() {
@@ -370,6 +488,63 @@ mod tests {
         assert_eq!(
             strip_notification_prefix("(Draft) Report - Word"),
             "(Draft) Report - Word"
+        );
+    }
+
+    fn target(url: &str) -> Snapshot {
+        Snapshot {
+            hwnd: 7,
+            pid: 42,
+            proc: "chrome".into(),
+            title: "A Short - YouTube".into(),
+            url: url.into(),
+        }
+    }
+
+    #[test]
+    fn missing_or_reused_window_confirms_the_original_is_gone() {
+        let cfg = Config::default();
+        let rule = cfg.rules[0].clone();
+        let original = target("youtube.com/shorts/abc");
+        assert_eq!(
+            confirmation_result(RuleAction::Close, &original, &rule, true, None),
+            Some(true)
+        );
+
+        let mut reused = original.clone();
+        reused.pid = 99;
+        assert_eq!(
+            confirmation_result(RuleAction::Close, &original, &rule, true, Some(&reused)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn tab_requires_the_original_rule_to_stop_matching() {
+        let cfg = Config::default();
+        let rule = cfg.rules[0].clone();
+        let original = target("youtube.com/shorts/abc");
+        assert_eq!(
+            confirmation_result(RuleAction::Tab, &original, &rule, true, Some(&original)),
+            Some(false)
+        );
+
+        let changed = target("youtube.com/watch?v=abc");
+        assert_eq!(
+            confirmation_result(RuleAction::Tab, &original, &rule, true, Some(&changed)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn unreadable_required_url_is_inconclusive() {
+        let cfg = Config::default();
+        let rule = cfg.rules[0].clone();
+        let original = target("youtube.com/shorts/abc");
+        let unreadable = target("");
+        assert_eq!(
+            confirmation_result(RuleAction::Tab, &original, &rule, true, Some(&unreadable)),
+            None
         );
     }
 }

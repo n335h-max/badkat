@@ -9,7 +9,7 @@
 <body>
 <div class="shell">
 
-  <nav class="side">
+  <nav class="side" aria-label="Settings sections">
     <div class="brand">
       <svg viewBox="0 0 200 150" class="brandcat" aria-hidden="true"><g id="brandMount"></g></svg>
       <div>
@@ -27,23 +27,23 @@
       <p class="lvlnote" id="lvlNote">50 XP to level 2</p>
     </div>
 
-    <button class="nav" data-panel="patrol" aria-current="true">Patrol</button>
-    <button class="nav" data-panel="rules">What counts</button>
-    <button class="nav" data-panel="never">Never touch</button>
-    <button class="nav" data-panel="cat">The cat</button>
-    <button class="nav" data-panel="live">Live view</button>
-    <button class="nav" data-panel="about">Updates</button>
+    <button class="nav" data-panel="patrol" aria-current="page" aria-controls="panel-patrol">Patrol</button>
+    <button class="nav" data-panel="rules" aria-controls="panel-rules">What counts</button>
+    <button class="nav" data-panel="never" aria-controls="panel-never">Never touch</button>
+    <button class="nav" data-panel="cat" aria-controls="panel-cat">The cat</button>
+    <button class="nav" data-panel="live" aria-controls="panel-live">Live view</button>
+    <button class="nav" data-panel="about" aria-controls="panel-about">Updates</button>
 
     <div class="side-foot">
-      <span class="saved" id="savedPill" hidden>saved</span>
+      <span class="saved" id="savedPill" role="status" aria-live="polite" hidden>saved</span>
     </div>
   </nav>
 
   <main class="panels">
 
     <!-- ---------------- patrol ---------------- -->
-    <section class="panel is-on" data-panel="patrol">
-      <header><h2>Patrol</h2><p>When the cat gets up, and what it does when it arrives.</p></header>
+    <section class="panel is-on" id="panel-patrol" data-panel="patrol" aria-labelledby="heading-patrol">
+      <header><h2 id="heading-patrol">Patrol</h2><p>When the cat gets up, and what it does when it arrives.</p></header>
 
       <div class="card">
         <label class="row switch">
@@ -85,12 +85,47 @@
           <em>The costliest part of the watch, about 100ms per read.</em>
         </label>
       </div>
+
+      <div class="card">
+        <p class="cardhead">Daily allowance</p>
+        <label class="row switch">
+          <input type="checkbox" id="dailyEnabled" />
+          <span class="lbl"><b>Allow some matched content first</b><i>After the allowance is used, normal rule grace and enforcement begin.</i></span>
+        </label>
+        <label class="field">
+          <span>Allowance per local day</span>
+          <div class="withunit"><input type="number" id="dailyMinutes" min="0" max="1440" /> <i>minutes</i></div>
+        </label>
+        <p class="lvlnote" id="usageStatus" aria-live="polite"></p>
+      </div>
+
+      <div class="card">
+        <p class="cardhead">Patrol schedule</p>
+        <label class="row switch">
+          <input type="checkbox" id="scheduleEnabled" />
+          <span class="lbl"><b>Use a weekly schedule</b><i>Outside this window, matched time is not counted and the cat does not intervene.</i></span>
+        </label>
+        <fieldset class="weekday-picker">
+          <legend>Active days</legend>
+          <label><input type="checkbox" name="scheduleDay" value="mon" /> Mon</label>
+          <label><input type="checkbox" name="scheduleDay" value="tue" /> Tue</label>
+          <label><input type="checkbox" name="scheduleDay" value="wed" /> Wed</label>
+          <label><input type="checkbox" name="scheduleDay" value="thu" /> Thu</label>
+          <label><input type="checkbox" name="scheduleDay" value="fri" /> Fri</label>
+          <label><input type="checkbox" name="scheduleDay" value="sat" /> Sat</label>
+          <label><input type="checkbox" name="scheduleDay" value="sun" /> Sun</label>
+        </fieldset>
+        <div class="grid2">
+          <label class="field"><span>Starts</span><input type="time" id="scheduleStart" /></label>
+          <label class="field"><span>Ends</span><input type="time" id="scheduleEnd" /><em>Equal times mean all day; an earlier end means overnight.</em></label>
+        </div>
+      </div>
     </section>
 
     <!-- ---------------- rules ---------------- -->
-    <section class="panel" data-panel="rules">
+    <section class="panel" id="panel-rules" data-panel="rules" aria-labelledby="heading-rules">
       <header>
-        <h2>What counts</h2>
+        <h2 id="heading-rules">What counts</h2>
         <p>Each rule is matched against the <b>URL</b>, the window <b>title</b> and the <b>process name</b> of
            whatever is in front of you. First match wins, so put specific rules above general ones.</p>
       </header>
@@ -116,9 +151,9 @@
     </section>
 
     <!-- ---------------- never ---------------- -->
-    <section class="panel" data-panel="never">
+    <section class="panel" id="panel-never" data-panel="never" aria-labelledby="heading-never">
       <header>
-        <h2>Never touch</h2>
+        <h2 id="heading-never">Never touch</h2>
         <p>A window whose URL, title or process contains any of these is left alone, whatever else it matches.
            One per line. This is the escape hatch for false positives.</p>
       </header>
@@ -129,8 +164,8 @@
     </section>
 
     <!-- ---------------- cat ---------------- -->
-    <section class="panel" data-panel="cat">
-      <header><h2>The cat</h2><p>How big it is, how fast it moves, and whether it wanders.</p></header>
+    <section class="panel" id="panel-cat" data-panel="cat" aria-labelledby="heading-cat">
+      <header><h2 id="heading-cat">The cat</h2><p>How big it is, how fast it moves, and whether it wanders.</p></header>
 
       <div class="card grid2">
         <label class="field">
@@ -187,14 +222,16 @@
         <div class="rowbtns">
           <button class="btn" id="previewBust">Show me what it does</button>
           <button class="btn ghost" id="toggleCat">Hide the cat</button>
+          <button class="btn ghost" id="snoozeNow">Snooze now</button>
+          <button class="btn ghost" id="patNow">Pat the cat</button>
         </div>
       </div>
     </section>
 
     <!-- ---------------- live ---------------- -->
-    <section class="panel" data-panel="live">
+    <section class="panel" id="panel-live" data-panel="live" aria-labelledby="heading-live">
       <header>
-        <h2>Live view</h2>
+        <h2 id="heading-live">Live view</h2>
         <p>Exactly what the cat can see right now. If a rule is not firing, this is the place to find out why —
            it shows the text your patterns are actually matched against.</p>
       </header>
@@ -213,13 +250,13 @@
         <div id="liveTrail" class="trail"><span class="dim">nothing yet</span></div>
       </div>
 
-      <div id="liveNotes"></div>
+      <div id="liveNotes" aria-live="polite"></div>
     </section>
 
     <!-- ---------------- updates / about ---------------- -->
-    <section class="panel" data-panel="about">
+    <section class="panel" id="panel-about" data-panel="about" aria-labelledby="heading-about">
       <header>
-        <h2>Updates</h2>
+        <h2 id="heading-about">Updates</h2>
         <p>New versions are published on GitHub and installed from here — you never have to
            go and download anything yourself.</p>
       </header>
@@ -229,7 +266,7 @@
           <div>
             <p class="cardhead" style="margin:0">Version</p>
             <p class="updver" id="updCurrent">—</p>
-            <p class="updnote" id="updStatus">Checking…</p>
+            <p class="updnote" id="updStatus" role="status" aria-live="polite">Checking…</p>
           </div>
           <div class="updactions">
             <button class="btn ghost" id="updCheck">Check now</button>

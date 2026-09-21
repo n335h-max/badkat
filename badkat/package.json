@@ -1,6 +1,6 @@
 {
   "name": "badkat",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "A desktop cat that closes your doomscrolling.",
   "type": "module",
@@ -11,10 +11,16 @@
     "start": "tauri dev",
     "prebuild": "npm run sync && npm run icons",
     "build": "tauri build",
+    "check:js": "node --check src/settings.js && node --check src/pet.js && node --check src/hit.js",
+    "test:a11y": "node scripts/check-accessibility.mjs",
+    "test:release": "node scripts/verify-release-assets.test.mjs",
+    "test": "npm run check:js && npm run test:a11y && npm run test:release",
     "pretauri": "npm run sync && npm run icons",
     "tauri": "tauri"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2"
+    "@tauri-apps/cli": "^2",
+    "axe-core": "^4.13.0",
+    "jsdom": "^29.1.1"
   }
 }
