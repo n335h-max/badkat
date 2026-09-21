@@ -13,7 +13,9 @@ if (!cargoVersion || new Set(versions).size !== 1) {
   throw new Error(`Version mismatch: package=${versions[0]}, tauri=${versions[1]}, cargo=${versions[2]}`);
 }
 
-const tag = process.argv[2] || process.env.GITHUB_REF_NAME || "";
+// CI also exposes GITHUB_REF_NAME for ordinary branches. Only release
+// callers pass a tag explicitly; a branch name is not a version tag.
+const tag = process.argv[2] || "";
 if (tag && tag !== `v${packageJson.version}`) {
   throw new Error(`Tag ${tag} does not match v${packageJson.version}`);
 }
