@@ -151,9 +151,9 @@ mod tests {
         save_json(&path, &value("A")).unwrap();
         save_json(&path, &value("B")).unwrap();
 
-        assert!(matches!(load_json(&path), LoadJson::Primary(v) if v == value("B")));
+        assert!(matches!(load_json::<Value>(&path), LoadJson::Primary(v) if v == value("B")));
         assert!(matches!(
-            load_json(&path.with_extension("json.bak")),
+            load_json::<Value>(&path.with_extension("json.bak")),
             LoadJson::Primary(v) if v == value("A")
         ));
         fs::remove_dir_all(dir).unwrap();
@@ -166,7 +166,7 @@ mod tests {
         fs::write(&path, "not json").unwrap();
         fs::write(path.with_extension("json.bak"), r#"{"name":"A"}"#).unwrap();
 
-        assert!(matches!(load_json(&path), LoadJson::Backup(v) if v == value("A")));
+        assert!(matches!(load_json::<Value>(&path), LoadJson::Backup(v) if v == value("A")));
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -202,7 +202,7 @@ mod tests {
         fs::create_dir(path.with_extension("json.bak")).unwrap();
 
         assert!(save_json(&path, &value("B")).is_err());
-        assert!(matches!(load_json(&path), LoadJson::Primary(v) if v == value("A")));
+        assert!(matches!(load_json::<Value>(&path), LoadJson::Primary(v) if v == value("A")));
         fs::remove_dir_all(dir).unwrap();
     }
 }

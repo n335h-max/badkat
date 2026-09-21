@@ -449,8 +449,8 @@ fn award_pat(app: AppHandle, state: tauri::State<State>) -> ProgressView {
 
 /// The overlay asks for this when its countdown reaches zero.
 #[tauri::command]
-async fn act(app: AppHandle, state: tauri::State<'_, State>, action_id: String) -> win::ActResult {
-    let inner: State = state.inner().clone();
+async fn act(app: AppHandle, action_id: String) -> Result<win::ActResult, String> {
+    let inner: State = app.state::<State>().inner().clone();
     let now = Instant::now();
     let fresh = win::fresh_foreground().unwrap_or_default();
     let authorized = {
@@ -474,10 +474,10 @@ async fn act(app: AppHandle, state: tauri::State<'_, State>, action_id: String) 
         Err(reason) => {
             let mut guard = inner.lock().unwrap();
             guard.note("skipped", "", reason);
-            return win::ActResult {
+            return Ok(win::ActResult {
                 acted: false,
                 reason: reason.into(),
-            };
+            });
         }
     };
 
@@ -514,7 +514,7 @@ async fn act(app: AppHandle, state: tauri::State<'_, State>, action_id: String) 
     if result.acted {
         bank_xp(&app, &inner, progress::XP_CLOSE, "close");
     }
-    result
+    Ok(result)
 }
 
 #[tauri::command]
