@@ -667,7 +667,7 @@ fn make_non_activating(window: &tauri::WebviewWindow) {
         GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
     };
     if let Ok(handle) = window.hwnd() {
-        let hwnd = HWND(handle.0 as *mut std::ffi::c_void);
+        let hwnd = HWND(handle.0);
         unsafe {
             let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE.0 as isize);
